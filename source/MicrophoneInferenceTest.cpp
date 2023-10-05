@@ -29,7 +29,7 @@ DEALINGS IN THE SOFTWARE.
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 #include "edge-impulse-sdk/dsp/numpy.hpp"
 
-#define INFERENCING_KEYWORD     "microbit"
+#define INFERENCING_KEYWORD     "turtle"
 
 static NRF52ADCChannel *mic = NULL;
 static ContinuousAudioStreamer *streamer = NULL;
@@ -67,8 +67,8 @@ static void heard_other() {
     const char * empty_emoji ="\
         000,000,000,000,000\n\
         000,000,000,000,000\n\
-        000,000,255,000,000\n\
-        000,000,000,000,000\n\
+        255,000,255,000,255\n\
+        000,255,000,255,000\n\
         000,000,000,000,000\n";
     MicroBitImage img(empty_emoji);
     uBit.display.print(img);

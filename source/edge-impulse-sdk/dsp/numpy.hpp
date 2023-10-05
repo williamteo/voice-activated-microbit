@@ -1,41 +1,54 @@
-/* Edge Impulse inferencing library
- * Copyright (c) 2021 EdgeImpulse Inc.
+/*
+ * Copyright (c) 2022 EdgeImpulse Inc.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an "AS
+ * IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+ * express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
  *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #ifndef _EIDSP_NUMPY_H_
 #define _EIDSP_NUMPY_H_
 
+// it's valid to include the SDK without a model, but there's information that we need
+// in model_metadata.h (like the FFT tables used).
+// if the compiler does not support the __has_include directive we'll assume that the
+// file exists.
+#ifndef __has_include
+#define __has_include 1
+#endif // __has_include
+
 #include <stdint.h>
 #include <string.h>
 #include <stddef.h>
 #include <cfloat>
+#include "ei_vector.h"
+#include <algorithm>
 #include "numpy_types.h"
 #include "config.hpp"
 #include "returntypes.hpp"
 #include "memory.hpp"
+#include "ei_utils.h"
 #include "dct/fast-dct-fft.h"
 #include "kissfft/kiss_fftr.h"
-#if EIDSP_USE_CMSIS_FIXED_RFFT
-#include "edge-impulse-sdk/CMSIS/DSP/Include/arm_math.h"
+#if __has_include("model-parameters/model_metadata.h")
+#include "model-parameters/model_metadata.h"
 #endif
+#if EIDSP_USE_CMSIS_DSP
+#include "edge-impulse-sdk/CMSIS/DSP/Include/arm_math.h"
+#include "edge-impulse-sdk/CMSIS/DSP/Include/arm_const_structs.h"
+#endif
+
+// For the following CMSIS includes, we want to use the C fallback, so include whether or not we set the CMSIS flag
+#include "edge-impulse-sdk/CMSIS/DSP/Include/dsp/statistics_functions.h"
 
 #ifdef __MBED__
 #include "mbed.h"
@@ -47,14 +60,28 @@
 
 namespace ei {
 
+using fvec = ei_vector<float>;
+using ivec = ei_vector<int>;
+
 // clang-format off
 // lookup table for quantized values between 0.0f and 1.0f
-static const float quantized_values_one_zero[] = { (0.0f / 1.0f), (1.0f / 100.0f), (2.0f / 100.0f), (3.0f / 100.0f), (4.0f / 100.0f), (1.0f / 22.0f), (1.0f / 21.0f), (1.0f / 20.0f), (1.0f / 19.0f), (1.0f / 18.0f), (1.0f / 17.0f), (6.0f / 100.0f), (1.0f / 16.0f), (1.0f / 15.0f), (7.0f / 100.0f), (1.0f / 14.0f), (1.0f / 13.0f), (8.0f / 100.0f), (1.0f / 12.0f), (9.0f / 100.0f), (1.0f / 11.0f), (2.0f / 21.0f), (1.0f / 10.0f), (2.0f / 19.0f), (11.0f / 100.0f), (1.0f / 9.0f), (2.0f / 17.0f), (12.0f / 100.0f), (1.0f / 8.0f), (13.0f / 100.0f), (2.0f / 15.0f), (3.0f / 22.0f), (14.0f / 100.0f), (1.0f / 7.0f), (3.0f / 20.0f), (2.0f / 13.0f), (3.0f / 19.0f), (16.0f / 100.0f), (1.0f / 6.0f), (17.0f / 100.0f), (3.0f / 17.0f), (18.0f / 100.0f), (2.0f / 11.0f), (3.0f / 16.0f), (19.0f / 100.0f), (4.0f / 21.0f), (1.0f / 5.0f), (21.0f / 100.0f), (4.0f / 19.0f), (3.0f / 14.0f), (22.0f / 100.0f), (2.0f / 9.0f), (5.0f / 22.0f), (23.0f / 100.0f), (3.0f / 13.0f), (4.0f / 17.0f), (5.0f / 21.0f), (24.0f / 100.0f), (1.0f / 4.0f), (26.0f / 100.0f), (5.0f / 19.0f), (4.0f / 15.0f), (27.0f / 100.0f), (3.0f / 11.0f), (5.0f / 18.0f), (28.0f / 100.0f), (2.0f / 7.0f), (29.0f / 100.0f), (5.0f / 17.0f), (3.0f / 10.0f), (4.0f / 13.0f), (31.0f / 100.0f), (5.0f / 16.0f), (6.0f / 19.0f), (7.0f / 22.0f), (32.0f / 100.0f), (33.0f / 100.0f), (1.0f / 3.0f), (34.0f / 100.0f), (7.0f / 20.0f), (6.0f / 17.0f), (5.0f / 14.0f), (36.0f / 100.0f), (4.0f / 11.0f), (7.0f / 19.0f), (37.0f / 100.0f), (3.0f / 8.0f), (38.0f / 100.0f), (8.0f / 21.0f), (5.0f / 13.0f), (7.0f / 18.0f), (39.0f / 100.0f), (2.0f / 5.0f), (9.0f / 22.0f), (41.0f / 100.0f), (7.0f / 17.0f), (5.0f / 12.0f), (42.0f / 100.0f), (8.0f / 19.0f), (3.0f / 7.0f), (43.0f / 100.0f), (7.0f / 16.0f), (44.0f / 100.0f), (4.0f / 9.0f), (9.0f / 20.0f), (5.0f / 11.0f), (46.0f / 100.0f), (6.0f / 13.0f), (7.0f / 15.0f), (47.0f / 100.0f), (8.0f / 17.0f), (9.0f / 19.0f), (10.0f / 21.0f), (48.0f / 100.0f), (49.0f / 100.0f), (1.0f / 2.0f), (51.0f / 100.0f), (52.0f / 100.0f), (11.0f / 21.0f), (10.0f / 19.0f), (9.0f / 17.0f), (53.0f / 100.0f), (8.0f / 15.0f), (7.0f / 13.0f), (54.0f / 100.0f), (6.0f / 11.0f), (11.0f / 20.0f), (5.0f / 9.0f), (56.0f / 100.0f), (9.0f / 16.0f), (57.0f / 100.0f), (4.0f / 7.0f), (11.0f / 19.0f), (58.0f / 100.0f), (7.0f / 12.0f), (10.0f / 17.0f), (59.0f / 100.0f), (13.0f / 22.0f), (3.0f / 5.0f), (61.0f / 100.0f), (11.0f / 18.0f), (8.0f / 13.0f), (13.0f / 21.0f), (62.0f / 100.0f), (5.0f / 8.0f), (63.0f / 100.0f), (12.0f / 19.0f), (7.0f / 11.0f), (64.0f / 100.0f), (9.0f / 14.0f), (11.0f / 17.0f), (13.0f / 20.0f), (66.0f / 100.0f), (2.0f / 3.0f), (67.0f / 100.0f), (68.0f / 100.0f), (15.0f / 22.0f), (13.0f / 19.0f), (11.0f / 16.0f), (69.0f / 100.0f), (9.0f / 13.0f), (7.0f / 10.0f), (12.0f / 17.0f), (71.0f / 100.0f), (5.0f / 7.0f), (72.0f / 100.0f), (13.0f / 18.0f), (8.0f / 11.0f), (73.0f / 100.0f), (11.0f / 15.0f), (14.0f / 19.0f), (74.0f / 100.0f), (3.0f / 4.0f), (76.0f / 100.0f), (16.0f / 21.0f), (13.0f / 17.0f), (10.0f / 13.0f), (77.0f / 100.0f), (17.0f / 22.0f), (7.0f / 9.0f), (78.0f / 100.0f), (11.0f / 14.0f), (15.0f / 19.0f), (79.0f / 100.0f), (4.0f / 5.0f), (17.0f / 21.0f), (81.0f / 100.0f), (13.0f / 16.0f), (9.0f / 11.0f), (82.0f / 100.0f), (14.0f / 17.0f), (83.0f / 100.0f), (5.0f / 6.0f), (84.0f / 100.0f), (16.0f / 19.0f), (11.0f / 13.0f), (17.0f / 20.0f), (6.0f / 7.0f), (86.0f / 100.0f), (19.0f / 22.0f), (13.0f / 15.0f), (87.0f / 100.0f), (7.0f / 8.0f), (88.0f / 100.0f), (15.0f / 17.0f), (8.0f / 9.0f), (89.0f / 100.0f), (17.0f / 19.0f), (9.0f / 10.0f), (19.0f / 21.0f), (10.0f / 11.0f), (91.0f / 100.0f), (11.0f / 12.0f), (92.0f / 100.0f), (12.0f / 13.0f), (13.0f / 14.0f), (93.0f / 100.0f), (14.0f / 15.0f), (15.0f / 16.0f), (94.0f / 100.0f), (16.0f / 17.0f), (17.0f / 18.0f), (18.0f / 19.0f), (19.0f / 20.0f), (20.0f / 21.0f), (21.0f / 22.0f), (96.0f / 100.0f), (97.0f / 100.0f), (98.0f / 100.0f), (99.0f / 100.0f), (1.0f / 1.0f) ,
+static constexpr float quantized_values_one_zero[] = { (0.0f / 1.0f), (1.0f / 100.0f), (2.0f / 100.0f), (3.0f / 100.0f), (4.0f / 100.0f), (1.0f / 22.0f), (1.0f / 21.0f), (1.0f / 20.0f), (1.0f / 19.0f), (1.0f / 18.0f), (1.0f / 17.0f), (6.0f / 100.0f), (1.0f / 16.0f), (1.0f / 15.0f), (7.0f / 100.0f), (1.0f / 14.0f), (1.0f / 13.0f), (8.0f / 100.0f), (1.0f / 12.0f), (9.0f / 100.0f), (1.0f / 11.0f), (2.0f / 21.0f), (1.0f / 10.0f), (2.0f / 19.0f), (11.0f / 100.0f), (1.0f / 9.0f), (2.0f / 17.0f), (12.0f / 100.0f), (1.0f / 8.0f), (13.0f / 100.0f), (2.0f / 15.0f), (3.0f / 22.0f), (14.0f / 100.0f), (1.0f / 7.0f), (3.0f / 20.0f), (2.0f / 13.0f), (3.0f / 19.0f), (16.0f / 100.0f), (1.0f / 6.0f), (17.0f / 100.0f), (3.0f / 17.0f), (18.0f / 100.0f), (2.0f / 11.0f), (3.0f / 16.0f), (19.0f / 100.0f), (4.0f / 21.0f), (1.0f / 5.0f), (21.0f / 100.0f), (4.0f / 19.0f), (3.0f / 14.0f), (22.0f / 100.0f), (2.0f / 9.0f), (5.0f / 22.0f), (23.0f / 100.0f), (3.0f / 13.0f), (4.0f / 17.0f), (5.0f / 21.0f), (24.0f / 100.0f), (1.0f / 4.0f), (26.0f / 100.0f), (5.0f / 19.0f), (4.0f / 15.0f), (27.0f / 100.0f), (3.0f / 11.0f), (5.0f / 18.0f), (28.0f / 100.0f), (2.0f / 7.0f), (29.0f / 100.0f), (5.0f / 17.0f), (3.0f / 10.0f), (4.0f / 13.0f), (31.0f / 100.0f), (5.0f / 16.0f), (6.0f / 19.0f), (7.0f / 22.0f), (32.0f / 100.0f), (33.0f / 100.0f), (1.0f / 3.0f), (34.0f / 100.0f), (7.0f / 20.0f), (6.0f / 17.0f), (5.0f / 14.0f), (36.0f / 100.0f), (4.0f / 11.0f), (7.0f / 19.0f), (37.0f / 100.0f), (3.0f / 8.0f), (38.0f / 100.0f), (8.0f / 21.0f), (5.0f / 13.0f), (7.0f / 18.0f), (39.0f / 100.0f), (2.0f / 5.0f), (9.0f / 22.0f), (41.0f / 100.0f), (7.0f / 17.0f), (5.0f / 12.0f), (42.0f / 100.0f), (8.0f / 19.0f), (3.0f / 7.0f), (43.0f / 100.0f), (7.0f / 16.0f), (44.0f / 100.0f), (4.0f / 9.0f), (9.0f / 20.0f), (5.0f / 11.0f), (46.0f / 100.0f), (6.0f / 13.0f), (7.0f / 15.0f), (47.0f / 100.0f), (8.0f / 17.0f), (9.0f / 19.0f), (10.0f / 21.0f), (48.0f / 100.0f), (49.0f / 100.0f), (1.0f / 2.0f), (51.0f / 100.0f), (52.0f / 100.0f), (11.0f / 21.0f), (10.0f / 19.0f), (9.0f / 17.0f), (53.0f / 100.0f), (8.0f / 15.0f), (7.0f / 13.0f), (54.0f / 100.0f), (6.0f / 11.0f), (11.0f / 20.0f), (5.0f / 9.0f), (56.0f / 100.0f), (9.0f / 16.0f), (57.0f / 100.0f), (4.0f / 7.0f), (11.0f / 19.0f), (58.0f / 100.0f), (7.0f / 12.0f), (10.0f / 17.0f), (59.0f / 100.0f), (13.0f / 22.0f), (3.0f / 5.0f), (61.0f / 100.0f), (11.0f / 18.0f), (8.0f / 13.0f), (13.0f / 21.0f), (62.0f / 100.0f), (5.0f / 8.0f), (63.0f / 100.0f), (12.0f / 19.0f), (7.0f / 11.0f), (64.0f / 100.0f), (9.0f / 14.0f), (11.0f / 17.0f), (13.0f / 20.0f), (66.0f / 100.0f), (2.0f / 3.0f), (67.0f / 100.0f), (68.0f / 100.0f), (15.0f / 22.0f), (13.0f / 19.0f), (11.0f / 16.0f), (69.0f / 100.0f), (9.0f / 13.0f), (7.0f / 10.0f), (12.0f / 17.0f), (71.0f / 100.0f), (5.0f / 7.0f), (72.0f / 100.0f), (13.0f / 18.0f), (8.0f / 11.0f), (73.0f / 100.0f), (11.0f / 15.0f), (14.0f / 19.0f), (74.0f / 100.0f), (3.0f / 4.0f), (76.0f / 100.0f), (16.0f / 21.0f), (13.0f / 17.0f), (10.0f / 13.0f), (77.0f / 100.0f), (17.0f / 22.0f), (7.0f / 9.0f), (78.0f / 100.0f), (11.0f / 14.0f), (15.0f / 19.0f), (79.0f / 100.0f), (4.0f / 5.0f), (17.0f / 21.0f), (81.0f / 100.0f), (13.0f / 16.0f), (9.0f / 11.0f), (82.0f / 100.0f), (14.0f / 17.0f), (83.0f / 100.0f), (5.0f / 6.0f), (84.0f / 100.0f), (16.0f / 19.0f), (11.0f / 13.0f), (17.0f / 20.0f), (6.0f / 7.0f), (86.0f / 100.0f), (19.0f / 22.0f), (13.0f / 15.0f), (87.0f / 100.0f), (7.0f / 8.0f), (88.0f / 100.0f), (15.0f / 17.0f), (8.0f / 9.0f), (89.0f / 100.0f), (17.0f / 19.0f), (9.0f / 10.0f), (19.0f / 21.0f), (10.0f / 11.0f), (91.0f / 100.0f), (11.0f / 12.0f), (92.0f / 100.0f), (12.0f / 13.0f), (13.0f / 14.0f), (93.0f / 100.0f), (14.0f / 15.0f), (15.0f / 16.0f), (94.0f / 100.0f), (16.0f / 17.0f), (17.0f / 18.0f), (18.0f / 19.0f), (19.0f / 20.0f), (20.0f / 21.0f), (21.0f / 22.0f), (96.0f / 100.0f), (97.0f / 100.0f), (98.0f / 100.0f), (99.0f / 100.0f), (1.0f / 1.0f) ,
     1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 // clang-format on
 
 class numpy {
 public:
+
+    static float sqrt(float x) {
+#if EIDSP_USE_CMSIS_DSP
+        float temp;
+        arm_sqrt_f32(x, &temp);
+        return temp;
+#else
+        return sqrtf(x);
+#endif
+    }
+
     /**
      * Roll array elements along a given axis.
      * Elements that roll beyond the last position are re-introduced at the first.
@@ -115,6 +142,38 @@ public:
 
         // and copy the shift buffer back to the beginning of the array
         memcpy(input_array, shift_matrix.buffer, shift * sizeof(int));
+
+        return EIDSP_OK;
+    }
+
+    /**
+     * Roll array elements along a given axis.
+     * Elements that roll beyond the last position are re-introduced at the first.
+     * @param input_array
+     * @param input_array_size
+     * @param shift The number of places by which elements are shifted.
+     * @returns EIDSP_OK if OK
+     */
+    static int roll(int16_t *input_array, size_t input_array_size, int shift) {
+        if (shift < 0) {
+            shift = input_array_size + shift;
+        }
+
+        if (shift == 0) {
+            return EIDSP_OK;
+        }
+
+        // so we need to allocate a buffer of the size of shift...
+        EI_DSP_MATRIX(shift_matrix, 1, shift);
+
+        // we copy from the end of the buffer into the shift buffer
+        memcpy(shift_matrix.buffer, input_array + input_array_size - shift, shift * sizeof(int16_t));
+
+        // now we do a memmove to shift the array
+        memmove(input_array + shift, input_array, (input_array_size - shift) * sizeof(int16_t));
+
+        // and copy the shift buffer back to the beginning of the array
+        memcpy(input_array, shift_matrix.buffer, shift * sizeof(int16_t));
 
         return EIDSP_OK;
     }
@@ -214,7 +273,7 @@ public:
      * @param out_matrix Pointer to out matrix (MxK)
      * @returns EIDSP_OK if OK
      */
-    static inline int dot_by_row(int i, float *row, uint32_t matrix1_cols, matrix_t *matrix2, matrix_t *out_matrix) {
+    static  int dot_by_row(int i, float *row, uint32_t matrix1_cols, matrix_t *matrix2, matrix_t *out_matrix) {
         if (matrix1_cols != matrix2->rows) {
             EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
         }
@@ -254,7 +313,7 @@ public:
      * @param out_matrix Pointer to out matrix (MxK)
      * @returns EIDSP_OK if OK
      */
-    static inline int dot_by_row(int i, float *row, size_t matrix1_cols,
+    static  int dot_by_row(int i, float *row, size_t matrix1_cols,
         quantized_matrix_t *matrix2, matrix_t *out_matrix)
     {
         if (matrix1_cols != matrix2->rows) {
@@ -275,12 +334,52 @@ public:
         return EIDSP_OK;
     }
 
+    static void transpose_in_place(matrix_t *matrix) {
+        size_t size = matrix->cols * matrix->rows - 1;
+        float temp; // temp for swap
+        size_t next; // next item to swap
+        size_t cycleBegin; // index of start of cycle
+        size_t i; // location in matrix
+        size_t all_done_mark = 1;
+        ei_vector<bool> done(size+1,false);
+
+        i = 1; // Note that matrix[0] and last element of matrix won't move
+        while (1)
+        {
+            cycleBegin = i;
+            temp = matrix->buffer[i];
+            do
+            {
+                size_t col = i % matrix->cols;
+                size_t row = i / matrix->cols;
+                // swap row and col to make new idx, b/c we want to know where in the transposed matrix
+                next = col*matrix->rows + row;
+                float temp2 = matrix->buffer[next];
+                matrix->buffer[next] = temp;
+                temp = temp2;
+                done[next] = true;
+                i = next;
+            }
+            while (i != cycleBegin);
+
+            // start next cycle by find next not done
+            for (i = all_done_mark; done[i]; i++) {
+                all_done_mark++; // move the high water mark so we don't look again
+                if(i>=size) { goto LOOP_END; }
+            }
+        }
+        LOOP_END:
+        // finally, swap the row and column dimensions
+        std::swap(matrix->rows, matrix->cols);
+    }
+
     /**
-     * Transpose an array in place (from MxN to NxM)
+     * Transpose an array, souce is destination (from MxN to NxM)
      * Note: this temporary allocates a copy of the matrix on the heap.
      * @param matrix
      * @param rows
      * @param columns
+     * @deprecated You probably want to use transpose_in_place
      * @returns EIDSP_OK if OK
      */
     static int transpose(matrix_t *matrix) {
@@ -298,26 +397,12 @@ public:
         return EIDSP_OK;
     }
 
-    static int transpose(matrix_i16_t *matrix) {
-        int r = transpose(matrix->buffer, matrix->cols, matrix->rows);
-        if (r != 0) {
-            return r;
-        }
-
-        uint16_t old_rows = matrix->rows;
-        uint16_t old_cols = matrix->cols;
-
-        matrix->rows = old_cols;
-        matrix->cols = old_rows;
-
-        return EIDSP_OK;
-    }
-
     /**
-     * Transpose an array in place (from MxN to NxM)
+     * Transpose an array, source is destination (from MxN to NxM)
      * @param matrix
      * @param rows
      * @param columns
+     * @deprecated You probably want to use transpose_in_place
      * @returns EIDSP_OK if OK
      */
     static int transpose(float *matrix, int rows, int columns) {
@@ -354,40 +439,6 @@ public:
 #endif
 
         memcpy(matrix, temp_matrix.buffer, rows * columns * sizeof(float));
-
-        return EIDSP_OK;
-    }
-
-    static int transpose(EIDSP_i16 *matrix, int rows, int columns) {
-        EI_DSP_i16_MATRIX(temp_matrix, rows, columns);
-        if (!temp_matrix.buffer) {
-            EIDSP_ERR(EIDSP_OUT_OF_MEM);
-        }
-
-#if EIDSP_USE_CMSIS_DSP
-        const arm_matrix_instance_q15 i_m = {
-            static_cast<uint16_t>(columns),
-            static_cast<uint16_t>(rows),
-            matrix
-        };
-        arm_matrix_instance_q15 o_m = {
-            static_cast<uint16_t>(rows),
-            static_cast<uint16_t>(columns),
-            temp_matrix.buffer
-        };
-        arm_status status = arm_mat_trans_q15(&i_m, &o_m);
-        if (status != ARM_MATH_SUCCESS) {
-            return status;
-        }
-#else
-        for (int j = 0; j < rows; j++){
-            for (int i = 0; i < columns; i++){
-                temp_matrix.buffer[j * columns + i] = matrix[i * rows + j];
-            }
-        }
-#endif
-
-        memcpy(matrix, temp_matrix.buffer, rows * columns * sizeof(EIDSP_i16));
 
         return EIDSP_OK;
     }
@@ -638,66 +689,6 @@ public:
         return EIDSP_OK;
     }
 
-    /**
-     * Scale a q15 matrix in place, per row
-     * @todo Now works for scale values between 0 and 1. Should also work for bigger values.
-     * @param matrix Input matrix (MxN)
-     * @param scale_matrix Scale matrix (Mx1)
-     * @returns 0 if OK
-     */
-    static int scale(matrix_i16_t *matrix, float scale) {
-        if (scale == 1.0f) return EIDSP_OK;
-        else if(scale > 1.0f) return EIDSP_PARAMETER_INVALID;
-
-        EIDSP_i16 scale_i16;
-        float_to_int16(&scale, &scale_i16, 1);
-
-#if EIDSP_USE_CMSIS_DSP
-        const arm_matrix_instance_q15 mi = {(uint16_t)matrix->rows, (uint16_t)matrix->cols, matrix->buffer };
-        arm_matrix_instance_q15 mo = { (uint16_t)matrix->rows, (uint16_t)matrix->cols, matrix->buffer };
-        int status = arm_mat_scale_q15(&mi, scale_i16, 0, &mo);
-        if (status != ARM_MATH_SUCCESS) {
-            return status;
-        }
-#else
-        for (size_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
-            int32_t prod = (int32_t)matrix->buffer[ix] * scale_i16;
-            matrix->buffer[ix] = saturate((EIDSP_i16)(prod >> 15), 16);
-        }
-#endif
-        return EIDSP_OK;
-    }
-
-    /**
-     * Scale a q31 matrix in place, per row
-     * @todo Now works for scale values between 0 and 1. Should also work for bigger values.
-     * @param matrix Input matrix (MxN)
-     * @param scale_matrix Scale matrix (Mx1)
-     * @returns 0 if OK
-     */
-    static int scale(matrix_i32_t *matrix, float scale) {
-        if (scale == 1.0f) return EIDSP_OK;
-        else if(scale > 1.0f) return EIDSP_PARAMETER_INVALID;
-
-        EIDSP_i32 scale_i32;
-        float_to_int32(&scale, &scale_i32, 1);
-
-#if EIDSP_USE_CMSIS_DSP
-        const arm_matrix_instance_q31 mi = { (uint16_t)matrix->rows, (uint16_t)matrix->cols, matrix->buffer };
-        arm_matrix_instance_q31 mo = { (uint16_t)matrix->rows, (uint16_t)matrix->cols, matrix->buffer };
-        int status = arm_mat_scale_q31(&mi, scale_i32, 0, &mo);
-        if (status != ARM_MATH_SUCCESS) {
-            return status;
-        }
-#else
-        for (size_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
-            int64_t prod = (int64_t)matrix->buffer[ix] * scale_i32;
-            matrix->buffer[ix] = saturate((EIDSP_i32)(prod >> 31), 32);
-        }
-#endif
-        return EIDSP_OK;
-    }
-
 
     /**
      * Scale a matrix in place, per row
@@ -778,19 +769,6 @@ public:
     }
 
     /**
-     * Subtract q15 from matrix in place
-     * @param matrix
-     * @param subtraction
-     * @returns 0 if OK
-     */
-    static int subtract(matrix_i16_t *matrix, EIDSP_i16 subtraction) {
-        for (uint32_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
-            matrix->buffer[ix] -= subtraction;
-        }
-        return EIDSP_OK;
-    }
-
-    /**
      * Add on a matrix in place, per row
      * @param matrix Input matrix (MxN)
      * @param add Scale matrix (Mx1)
@@ -807,32 +785,6 @@ public:
 
         for (size_t row = 0; row < matrix->rows; row++) {
             EI_DSP_MATRIX_B(temp, 1, matrix->cols, matrix->buffer + (row * matrix->cols));
-            int ret = subtract(&temp, subtract_matrix->buffer[row]);
-            if (ret != EIDSP_OK) {
-                EIDSP_ERR(ret);
-            }
-        }
-
-        return EIDSP_OK;
-    }
-
-    /**
-     * Subract subtract_matrix from matrix
-     * @param matrix Input matrix (MxN)
-     * @param add Scale matrix (Mx1)
-     * @returns 0 if OK
-     */
-    static int subtract(matrix_i16_t *matrix, matrix_i16_t *subtract_matrix) {
-        if (matrix->rows != subtract_matrix->rows) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-
-        if (subtract_matrix->cols != 1) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-
-        for (size_t row = 0; row < matrix->rows; row++) {
-            EI_DSP_i16_MATRIX_B(temp, 1, matrix->cols, matrix->buffer + (row * matrix->cols));
             int ret = subtract(&temp, subtract_matrix->buffer[row]);
             if (ret != EIDSP_OK) {
                 EIDSP_ERR(ret);
@@ -876,39 +828,6 @@ public:
     }
 
     /**
-     * Calculate the root mean square of a q15 matrix, one per row
-     * @param matrix Matrix of size (MxN)
-     * @param output_matrix Matrix of size (Mx1)
-     * @returns 0 if OK
-     */
-    static int rms(matrix_i16_t *matrix, matrix_i16_t *output_matrix) {
-        if (matrix->rows != output_matrix->rows) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-
-        if (output_matrix->cols != 1) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-
-        for (size_t row = 0; row < matrix->rows; row++) {
-#if EIDSP_USE_CMSIS_DSP
-            EIDSP_i16 rms_result;
-            arm_rms_q15(matrix->buffer + (row * matrix->cols), matrix->cols, &rms_result);
-            output_matrix->buffer[row] = rms_result;
-#else
-            int64_t sum = 0;
-            for(size_t ix = 0; ix < matrix->cols; ix++) {
-                int32_t v = matrix->buffer[(row * matrix->cols) + ix];
-                sum += (int64_t)abs(v * v);
-            }
-            sqrt_q15(saturate((sum / matrix->cols)>>15, 16UL), &output_matrix->buffer[row]);
-#endif
-        }
-
-        return EIDSP_OK;
-    }
-
-    /**
      * Calculate the mean over a matrix per row
      * @param input_matrix Input matrix (MxN)
      * @param output_matrix Output matrix (Mx1)
@@ -934,38 +853,6 @@ public:
             }
 
             output_matrix->buffer[row] = sum / input_matrix->cols;
-#endif
-        }
-
-        return EIDSP_OK;
-    }
-
-    /**
-     * Calculate the mean over a q15 matrix per row
-     * @param input_matrix Input matrix (MxN)
-     * @param output_matrix Output matrix (Mx1)
-     */
-    static int mean(matrix_i16_t *input_matrix, matrix_i16_t *output_matrix) {
-        if (input_matrix->rows != output_matrix->rows) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-        if (output_matrix->cols != 1) {
-            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
-        }
-
-        for (size_t row = 0; row < input_matrix->rows; row++) {
-#if EIDSP_USE_CMSIS_DSP
-            EIDSP_i16 mean;
-            arm_mean_q15(input_matrix->buffer + (row * input_matrix->cols), input_matrix->cols, &mean);
-            output_matrix->buffer[row] = mean;
-#else
-            int32_t sum = 0.0f;
-
-            for (size_t col = 0; col < input_matrix->cols; col++) {
-                sum += input_matrix->buffer[( row * input_matrix->cols ) + col];
-            }
-
-            output_matrix->buffer[row] = (EIDSP_i16)(sum / input_matrix->cols);
 #endif
         }
 
@@ -1194,7 +1081,11 @@ public:
             arm_sqrt_f32(var * var * var, &var);
 
             // Calculate skew = (m_3) / (variance)^(3/2)
-            output_matrix->buffer[row] = m_3 / var;
+            if (var == 0.0f) {
+                output_matrix->buffer[row] = 0.0f;
+            } else {
+                output_matrix->buffer[row] = m_3 / var;
+            }
 #else
             float sum = 0.0f;
             float mean;
@@ -1222,7 +1113,11 @@ public:
             m_2 = sqrt(m_2 * m_2 * m_2);
 
             // Calculate skew = (m_3) / (m_2)^(3/2)
-            output_matrix->buffer[row] = m_3 / m_2;
+            if (m_2 == 0.0f) {
+                output_matrix->buffer[row] = 0.0f;
+            } else {
+                output_matrix->buffer[row] = m_3 / m_2;
+            }
 #endif
         }
 
@@ -1256,7 +1151,12 @@ public:
             cmsis_arm_fourth_moment(&input_matrix->buffer[(row * input_matrix->cols)], input_matrix->cols, mean, &m_4);
 
             // Calculate Fisher kurtosis = (m_4 / variance^2) - 3
-            output_matrix->buffer[row] = (m_4 / (var * var)) - 3;
+            var = var * var;
+            if (var == 0.0f) {
+                output_matrix->buffer[row] = -3.0f;
+            } else {
+                output_matrix->buffer[row] = (m_4 / var) - 3.0f;
+            }
 #else
             // Calculate the mean
             float mean = 0.0f;
@@ -1284,12 +1184,17 @@ public:
             // Square the variance
             variance = variance * variance;
             // Calculate Fisher kurtosis = (m_4 / variance^2) - 3
-            output_matrix->buffer[row] = (m_4 / variance) - 3;
+            if (variance == 0.0f) {
+                output_matrix->buffer[row] = -3.0f;
+            } else {
+                output_matrix->buffer[row] = (m_4 / variance) - 3.0f;
+            }
 #endif
         }
 
         return EIDSP_OK;
     }
+
 
     /**
      * Compute the one-dimensional discrete Fourier Transform for real input.
@@ -1334,7 +1239,7 @@ public:
         else {
             // hardware acceleration only works for the powers above...
             arm_rfft_fast_instance_f32 rfft_instance;
-            arm_status status = arm_rfft_fast_init_f32(&rfft_instance, n_fft);
+            int status = cmsis_rfft_init_f32(&rfft_instance, n_fft);
             if (status != ARM_MATH_SUCCESS) {
                 return status;
             }
@@ -1368,146 +1273,6 @@ public:
         return EIDSP_OK;
     }
 
-    /**
-     * Compute the one-dimensional discrete Fourier Transform for real input.
-     * This function computes the one-dimensional n-point discrete Fourier Transform (DFT) of
-     * a real-valued array by means of an efficient algorithm called the Fast Fourier Transform (FFT).
-     * @param src Source buffer
-     * @param src_size Size of the source buffer
-     * @param output Output buffer
-     * @param output_size Size of the output buffer, should be n_fft / 2 + 1
-     * @returns 0 if OK
-     */
-    static int rfft(const EIDSP_i16 *src, size_t src_size, EIDSP_i16 *output, size_t output_size, size_t n_fft) {
-        size_t n_fft_out_features = (n_fft / 2) + 1;
-        if (output_size != n_fft_out_features) {
-            EIDSP_ERR(EIDSP_BUFFER_SIZE_MISMATCH);
-        }
-
-        // truncate if needed
-        if (src_size > n_fft) {
-            src_size = n_fft;
-        }
-
-        // declare input and output arrays
-        EI_DSP_i16_MATRIX(fft_input, 1, n_fft << 1);
-
-        // copy from src to fft_input
-        memcpy(fft_input.buffer, src, src_size * sizeof(EIDSP_i16));
-        // pad to the rigth with zeros
-        memset(fft_input.buffer + src_size, 0, (n_fft - src_size) * sizeof(EIDSP_i16));
-
-#if EIDSP_USE_CMSIS_FIXED_RFFT
-        if (n_fft != 32 && n_fft != 64 && n_fft != 128 && n_fft != 256 &&
-            n_fft != 512 && n_fft != 1024 && n_fft != 2048 && n_fft != 4096) {
-            EIDSP_ERR(EIDSP_PARAMETER_INVALID); //TODO zero pad so we can use anyway`
-        } else {
-            // hardware acceleration only works for the powers above...
-            arm_rfft_instance_q15 rfft_instance;
-            arm_status status = arm_rfft_init_q15(&rfft_instance, n_fft, 0, 1);
-            if (status != ARM_MATH_SUCCESS) {
-                return (int)status;
-            }
-
-            EI_DSP_i16_MATRIX(fft_output, 1, n_fft << 1);
-            if (!fft_output.buffer) {
-                EIDSP_ERR(EIDSP_OUT_OF_MEM);
-            }
-
-            arm_rfft_q15(&rfft_instance, fft_input.buffer, fft_output.buffer);
-
-            output[0] = fft_output.buffer[0];
-            output[n_fft_out_features - 1] = fft_output.buffer[1];
-
-            size_t fft_output_buffer_ix = 2;
-            for (size_t ix = 1; ix < n_fft_out_features - 1; ix += 1) {
-                EIDSP_i16 rms_result;
-                arm_rms_q15(&fft_output.buffer[fft_output_buffer_ix], 2, &rms_result);
-                output[ix] = (EIDSP_i16)saturate((int32_t)rms_result * ((int32_t)(1.414213562f * (1 << 15))) >> 15, 16); /* sqrt(2) */
-
-                fft_output_buffer_ix += 2;
-            }
-        }
-#else
-        #error("No DSP lib defined!  Use CMSIS-DSP for C implementation ( #define EIDSP_USE_CMSIS_FIXED_RFFT 1 )")
-#endif
-
-        return EIDSP_OK;
-    }
-
-
-    /**
-     * Compute the one-dimensional discrete Fourier Transform for real input.
-     * This function computes the one-dimensional n-point discrete Fourier Transform (DFT) of
-     * a real-valued array by means of an efficient algorithm called the Fast Fourier Transform (FFT).
-     * @param src Source buffer
-     * @param src_size Size of the source buffer
-     * @param output Output buffer
-     * @param output_size Size of the output buffer, should be n_fft / 2 + 1
-     * @returns 0 if OK
-     */
-    static int rfft(const EIDSP_i32 *src, size_t src_size, EIDSP_i32 *output, size_t output_size, size_t n_fft) {
-        size_t n_fft_out_features = (n_fft / 2) + 1;
-        if (output_size != n_fft_out_features) {
-            EIDSP_ERR(EIDSP_BUFFER_SIZE_MISMATCH);
-        }
-
-        // truncate if needed
-        if (src_size > n_fft) {
-            src_size = n_fft;
-        }
-
-        // declare input and output arrays
-        EI_DSP_i32_MATRIX(fft_input, 1, n_fft << 1);
-        
-        if (!fft_input.buffer) {
-            EIDSP_ERR(EIDSP_OUT_OF_MEM);
-        }
-
-        // copy from src to fft_input
-        memcpy(fft_input.buffer, src, src_size * sizeof(EIDSP_i32));
-        // pad to the rigth with zeros
-        memset(fft_input.buffer + src_size, 0, (n_fft - src_size) * sizeof(EIDSP_i32));
-
-#if EIDSP_USE_CMSIS_FIXED_RFFT
-        if (n_fft != 32 && n_fft != 64 && n_fft != 128 && n_fft != 256 &&
-            n_fft != 512 && n_fft != 1024 && n_fft != 2048 && n_fft != 4096) {
-            EIDSP_ERR(EIDSP_PARAMETER_INVALID);
-        } else {
-            // hardware acceleration only works for the powers above...
-            arm_rfft_instance_q31 rfft_instance;
-            arm_status status = arm_rfft_init_q31(&rfft_instance, n_fft, 0, 1);
-            if (status != ARM_MATH_SUCCESS) {
-                return status;
-            }
-
-            // EI_DSP_i16_MATRIX(fft_output, 1, n_fft << 1);
-            matrix_i32_t fft_output(1, n_fft << 1);
-
-            if (!fft_output.buffer) {
-                EIDSP_ERR(EIDSP_OUT_OF_MEM);
-            }
-
-            arm_rfft_q31(&rfft_instance, (EIDSP_i32 *)fft_input.buffer, (EIDSP_i32 *)fft_output.buffer);
-
-            output[0] = fft_output.buffer[0];
-            output[n_fft_out_features - 1] = fft_output.buffer[1];
-
-            size_t fft_output_buffer_ix = 2;
-            for (size_t ix = 1; ix < n_fft_out_features - 1; ix += 1) {
-                EIDSP_i32 rms_result;
-                arm_rms_q31((EIDSP_i32 *)&fft_output.buffer[fft_output_buffer_ix], 2, &rms_result);
-                output[ix] = (EIDSP_i32)saturate((int64_t)rms_result * ((int64_t)(1.414213562f * 2147483648.f)) >> 31, 32); /* sqrt(2) */
-
-                fft_output_buffer_ix += 2;
-            }
-        }
-#else
-        #error("No DSP lib defined!  Use CMSIS-DSP for C implementation ( #define EIDSP_USE_CMSIS_FIXED_RFFT 1 )")
-#endif
-
-        return EIDSP_OK;
-    }
 
     /**
      * Compute the one-dimensional discrete Fourier Transform for real input.
@@ -1559,7 +1324,7 @@ public:
         else {
             // hardware acceleration only works for the powers above...
             arm_rfft_fast_instance_f32 rfft_instance;
-            arm_status status = arm_rfft_fast_init_f32(&rfft_instance, n_fft);
+            int status = cmsis_rfft_init_f32(&rfft_instance, n_fft);
             if (status != ARM_MATH_SUCCESS) {
                 return status;
             }
@@ -1594,81 +1359,6 @@ public:
         return EIDSP_OK;
     }
 
-    static int rfft(const EIDSP_i16 *src, size_t src_size, fft_complex_i16_t *output, size_t output_size, size_t n_fft) {
-        size_t n_fft_out_features = (n_fft / 2) + 1;
-        if (output_size != n_fft_out_features) {
-            EIDSP_ERR(EIDSP_BUFFER_SIZE_MISMATCH);
-        }
-
-        // truncate if needed
-        if (src_size > n_fft) {
-            src_size = n_fft;
-        }
-
-        // declare input and output arrays
-        EIDSP_i16 *fft_input_buffer = NULL;
-        if (src_size == n_fft) {
-            fft_input_buffer = (EIDSP_i16*)src;
-        }
-
-        EI_DSP_i16_MATRIX_B(fft_input, 1, n_fft, fft_input_buffer);
-        if (!fft_input.buffer) {
-            EIDSP_ERR(EIDSP_OUT_OF_MEM);
-        }
-
-        if (!fft_input_buffer) {
-            // copy from src to fft_input
-            memcpy(fft_input.buffer, src, src_size * sizeof(EIDSP_i16));
-            // pad to the rigth with zeros
-            memset(fft_input.buffer + src_size, 0, (n_fft - src_size) * sizeof(EIDSP_i16));
-        }
-
-#if 1//EIDSP_USE_CMSIS_DSP
-        // if (n_fft != 32 && n_fft != 64 && n_fft != 128 && n_fft != 256 &&
-        //     n_fft != 512 && n_fft != 1024 && n_fft != 2048 && n_fft != 4096) {
-        //     int ret = software_rfft(fft_input.buffer, output, n_fft, n_fft_out_features);
-        //     if (ret != EIDSP_OK) {
-        //         EIDSP_ERR(ret);
-        //     }
-        // }
-        // else {
-        {
-            // hardware acceleration only works for the powers above...
-            arm_rfft_instance_q15 rfft_instance;
-            arm_status status = arm_rfft_init_q15(&rfft_instance, n_fft, 0, 1);
-            if (status != ARM_MATH_SUCCESS) {
-                return status;
-            }
-
-            EI_DSP_i16_MATRIX(fft_output, 1, n_fft << 1);
-            if (!fft_output.buffer) {
-                EIDSP_ERR(EIDSP_OUT_OF_MEM);
-            }
-
-            arm_rfft_q15(&rfft_instance, fft_input.buffer, fft_output.buffer);
-
-            output[0].r = fft_output.buffer[0];
-            output[0].i = 0.0f;
-            output[n_fft_out_features - 1].r = fft_output.buffer[1];
-            output[n_fft_out_features - 1].i = 0.0f;
-
-            size_t fft_output_buffer_ix = 2;
-            for (size_t ix = 1; ix < n_fft_out_features - 1; ix += 1) {
-                output[ix].r = fft_output.buffer[fft_output_buffer_ix];
-                output[ix].i = fft_output.buffer[fft_output_buffer_ix + 1];
-
-                fft_output_buffer_ix += 2;
-            }
-        }
-#else
-        int ret = software_rfft(fft_input.buffer, output, n_fft, n_fft_out_features);
-        if (ret != EIDSP_OK) {
-            EIDSP_ERR(ret);
-        }
-#endif
-
-        return EIDSP_OK;
-    }
 
     /**
      * Return evenly spaced numbers over a specified interval.
@@ -1697,45 +1387,6 @@ public:
 
         // step size
         float step = (stop - start) / (number - 1);
-
-        // do steps
-        for (uint32_t ix = 0; ix < number - 1; ix++) {
-            out[ix] = start + ix * step;
-        }
-
-        // last entry always stop
-        out[number - 1] = stop;
-
-        return EIDSP_OK;
-    }
-
-    /**
-     * Return evenly spaced q15 numbers over a specified interval.
-     * Returns num evenly spaced samples, calculated over the interval [start, stop].
-     * The endpoint of the interval can optionally be excluded.
-     *
-     * Based on https://github.com/ntessore/algo/blob/master/linspace.c
-     * Licensed in public domain (see LICENSE in repository above)
-     *
-     * @param start The starting value of the sequence.
-     * @param stop The end value of the sequence.
-     * @param number Number of samples to generate.
-     * @param out Out array, with size `number`
-     * @returns 0 if OK
-     */
-    static int linspace(EIDSP_i16 start, EIDSP_i16 stop, uint32_t number, EIDSP_i16 *out)
-    {
-        if (number < 1 || !out) {
-            EIDSP_ERR(EIDSP_PARAMETER_INVALID);
-        }
-
-        if (number == 1) {
-            out[0] = start;
-            return EIDSP_OK;
-        }
-
-        // step size
-        EIDSP_i16 step = (stop - start) / (number - 1);
 
         // do steps
         for (uint32_t ix = 0; ix < number - 1; ix++) {
@@ -1889,7 +1540,7 @@ public:
      * @param signal Output signal
      * @returns EIDSP_OK if ok
      */
-    static int signal_from_buffer(float *data, size_t data_size, signal_t *signal)
+    static int signal_from_buffer(const float *data, size_t data_size, signal_t *signal)
     {
         signal->total_length = data_size;
 #ifdef __MBED__
@@ -1902,27 +1553,7 @@ public:
         return EIDSP_OK;
     }
 
-    static int signal_from_buffer_i16(EIDSP_i16 *data_i16, size_t data_size, signal_i16_t *signal)
-    {
-        signal->total_length = data_size;
-#ifdef __MBED__
-        signal->get_data = mbed::callback(&numpy::signal_get_data_i16, data_i16);
-#else
-        signal->get_data = [data_i16](size_t offset, size_t length, EIDSP_i16 *out_ptr) {
-            return numpy::signal_get_data_i16(data_i16, offset, length, out_ptr);
-        };
 #endif
-        return EIDSP_OK;
-    }
-#endif
-
-    static int signal_from_buffer_pointer_function_q15(size_t data_size, signal_i16_t *signal, int (*data_i16)(size_t, size_t, EIDSP_i16 *))
-    {
-        signal->total_length = data_size;
-        signal->get_data = data_i16;
-
-        return EIDSP_OK;
-    }
 
 #if defined ( __GNUC__ )
 #pragma GCC diagnostic push
@@ -1938,25 +1569,54 @@ public:
      */
     __attribute__((always_inline)) static inline float log(float a)
     {
-        float m, r, s, t, i, f;
-        int32_t e, g;
-
-        g = (int32_t) * ((int32_t *)&a);
-        e = (g - 0x3f2aaaab) & 0xff800000;
+        int32_t g = (int32_t) * ((int32_t *)&a);
+        int32_t e = (g - 0x3f2aaaab) & 0xff800000;
         g = g - e;
-        m = (float) * ((float *)&g);
-        i = (float)e * 1.19209290e-7f; // 0x1.0p-23
+        float m = (float) * ((float *)&g);
+        float i = (float)e * 1.19209290e-7f; // 0x1.0p-23
         /* m in [2/3, 4/3] */
-        f = m - 1.0f;
-        s = f * f;
+        float f = m - 1.0f;
+        float s = f * f;
         /* Compute log1p(f) for f in [-1/3, 1/3] */
-        r = fmaf(0.230836749f, f, -0.279208571f); // 0x1.d8c0f0p-3, -0x1.1de8dap-2
-        t = fmaf(0.331826031f, f, -0.498910338f); // 0x1.53ca34p-2, -0x1.fee25ap-2
+        float r = fmaf(0.230836749f, f, -0.279208571f); // 0x1.d8c0f0p-3, -0x1.1de8dap-2
+        float t = fmaf(0.331826031f, f, -0.498910338f); // 0x1.53ca34p-2, -0x1.fee25ap-2
         r = fmaf(r, s, t);
         r = fmaf(r, s, f);
         r = fmaf(i, 0.693147182f, r); // 0x1.62e430p-1 // log(2)
 
         return r;
+    }
+
+    /**
+     * Fast log10 and log2 functions, significantly faster than the ones from math.h (~6x for log10 on M4F)
+     * From https://community.arm.com/developer/tools-software/tools/f/armds-forum/4292/cmsis-dsp-new-functionality-proposal/22621#22621
+     * @param a Input number
+     * @returns Log2 value of a
+     */
+    __attribute__((always_inline)) static inline float log2(float a)
+    {
+        int e;
+        float f = frexpf(fabsf(a), &e);
+        float y = 1.23149591368684f;
+        y *= f;
+        y += -4.11852516267426f;
+        y *= f;
+        y += 6.02197014179219f;
+        y *= f;
+        y += -3.13396450166353f;
+        y += e;
+        return y;
+    }
+
+    /**
+     * Fast log10 and log2 functions, significantly faster than the ones from math.h (~6x for log10 on M4F)
+     * From https://community.arm.com/developer/tools-software/tools/f/armds-forum/4292/cmsis-dsp-new-functionality-proposal/22621#22621
+     * @param a Input number
+     * @returns Log10 value of a
+     */
+    __attribute__((always_inline)) static inline float log10(float a)
+    {
+        return numpy::log2(a) * 0.3010299956639812f;
     }
 #if defined ( __GNUC__ )
 #pragma GCC diagnostic pop
@@ -1971,6 +1631,20 @@ public:
     {
         for (uint32_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
             matrix->buffer[ix] = numpy::log(matrix->buffer[ix]);
+        }
+
+        return EIDSP_OK;
+    }
+
+    /**
+     * Calculate the log10 of a matrix. Does an in-place replacement.
+     * @param matrix Matrix (MxN)
+     * @returns 0 if OK
+     */
+    static int log10(matrix_t *matrix)
+    {
+        for (uint32_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
+            matrix->buffer[ix] = numpy::log10(matrix->buffer[ix]);
         }
 
         return EIDSP_OK;
@@ -2028,7 +1702,9 @@ public:
             EIDSP_ERR(r);
         }
 
-        float row_scale = 1.0f / (max_matrix.buffer[0] - min_matrix.buffer[0]);
+        float min_max_diff = (max_matrix.buffer[0] - min_matrix.buffer[0]);
+        /* Prevent divide by 0 by setting minimum value for divider */
+        float row_scale = min_max_diff < 0.001 ? 1.0f : 1.0f / min_max_diff;
 
         r = subtract(&temp_matrix, min_matrix.buffer[0]);
         if (r != EIDSP_OK) {
@@ -2043,7 +1719,45 @@ public:
         return EIDSP_OK;
     }
 
-private:
+    /**
+     * Clip (limit) the values in an array. Does an in-place replacement.
+     * Values outside the interval are clipped to the interval edges.
+     * For example, if an interval of [0, 1] is specified, values smaller than 0 become 0,
+     * and values larger than 1 become 1.
+     * @param matrix
+     * @param min Min value to be clipped
+     * @param max Max value to be clipped
+     */
+    static int clip(matrix_t *matrix, float min, float max) {
+        if (max < min) {
+            EIDSP_ERR(EIDSP_PARAMETER_INVALID);
+        }
+
+        for (size_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
+            if (matrix->buffer[ix] < min) {
+                matrix->buffer[ix] = min;
+            }
+            else if (matrix->buffer[ix] > max) {
+                matrix->buffer[ix] = max;
+            }
+        }
+
+        return EIDSP_OK;
+    }
+
+    /**
+     * Cut the data behind the comma on a matrix. Does an in-place replacement.
+     * E.g. around([ 3.01, 4.89 ]) becomes [3, 4]
+     * @param matrix
+     */
+    static int round(matrix_t *matrix) {
+        for (size_t ix = 0; ix < matrix->rows * matrix->cols; ix++) {
+            matrix->buffer[ix] = ::round(matrix->buffer[ix]);
+        }
+
+        return EIDSP_OK;
+    }
+
     static int software_rfft(float *fft_input, float *output, size_t n_fft, size_t n_fft_out_features) {
         kiss_fft_cpx *fft_output = (kiss_fft_cpx*)ei_dsp_malloc(n_fft_out_features * sizeof(kiss_fft_cpx));
         if (!fft_output) {
@@ -2059,7 +1773,7 @@ private:
             EIDSP_ERR(EIDSP_OUT_OF_MEM);
         }
 
-        ei_dsp_register_alloc(kiss_fftr_mem_length);
+        ei_dsp_register_alloc(kiss_fftr_mem_length, cfg);
 
         // execute the rfft operation
         kiss_fftr(cfg, fft_input, fft_output);
@@ -2085,7 +1799,7 @@ private:
             EIDSP_ERR(EIDSP_OUT_OF_MEM);
         }
 
-        ei_dsp_register_alloc(kiss_fftr_mem_length);
+        ei_dsp_register_alloc(kiss_fftr_mem_length, cfg);
 
         // execute the rfft operation
         kiss_fftr(cfg, fft_input, (kiss_fft_cpx*)output);
@@ -2095,7 +1809,7 @@ private:
         return EIDSP_OK;
     }
 
-    static int signal_get_data(float *in_buffer, size_t offset, size_t length, float *out_ptr)
+    static int signal_get_data(const float *in_buffer, size_t offset, size_t length, float *out_ptr)
     {
         memcpy(out_ptr, in_buffer + offset, length * sizeof(float));
         return 0;
@@ -2453,8 +2167,612 @@ private:
             *pOut = 0;
         }
     }
+
+#if EIDSP_USE_CMSIS_DSP
+    /**
+     * Initialize a CMSIS-DSP fast rfft structure
+     * We do it this way as this means we can compile out fast_init calls which hints the compiler
+     * to which tables can be removed
+     */
+    static int cmsis_rfft_init_f32(arm_rfft_fast_instance_f32 *rfft_instance, const size_t n_fft)
+    {
+// ARM cores (ex M55) with Helium extensions (MVEF) need special treatment (Issue 2843)
+#if EI_CLASSIFIER_HAS_FFT_INFO == 1 && !defined(ARM_MATH_MVEF) && !defined(EI_CLASSIFIER_LOAD_ALL_FFTS)
+        arm_status status;
+        switch (n_fft) {
+#if EI_CLASSIFIER_LOAD_FFT_32 == 1
+            case 32: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 16U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len16.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len16.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len16.pTwiddle;
+                rfft_instance->fftLenRFFT = 32U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_32;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_64 == 1
+            case 64: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 32U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len32.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len32.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len32.pTwiddle;
+                rfft_instance->fftLenRFFT = 64U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_64;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_128 == 1
+            case 128: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 64U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len64.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len64.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len64.pTwiddle;
+                rfft_instance->fftLenRFFT = 128U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_128;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_256 == 1
+            case 256: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 128U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len128.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len128.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len128.pTwiddle;
+                rfft_instance->fftLenRFFT = 256U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_256;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_512 == 1
+            case 512: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 256U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len256.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len256.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len256.pTwiddle;
+                rfft_instance->fftLenRFFT = 512U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_512;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_1024 == 1
+            case 1024: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 512U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len512.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len512.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len512.pTwiddle;
+                rfft_instance->fftLenRFFT = 1024U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_1024;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_2048 == 1
+            case 2048: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 1024U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len1024.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len1024.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len1024.pTwiddle;
+                rfft_instance->fftLenRFFT = 2048U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_2048;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+#if EI_CLASSIFIER_LOAD_FFT_4096 == 1
+            case 4096: {
+                arm_cfft_instance_f32 *S = &(rfft_instance->Sint);
+                S->fftLen = 2048U;
+                S->pTwiddle = NULL;
+                S->bitRevLength = arm_cfft_sR_f32_len2048.bitRevLength;
+                S->pBitRevTable = arm_cfft_sR_f32_len2048.pBitRevTable;
+                S->pTwiddle = arm_cfft_sR_f32_len2048.pTwiddle;
+                rfft_instance->fftLenRFFT = 4096U;
+                rfft_instance->pTwiddleRFFT = (float32_t *) twiddleCoef_rfft_4096;
+                status = ARM_MATH_SUCCESS;
+                break;
+            }
+#endif
+            default:
+                return EIDSP_FFT_TABLE_NOT_LOADED;
+        }
+
+        return status;
+#else
+        return arm_rfft_fast_init_f32(rfft_instance, n_fft);
+#endif
+    }
+#endif // #if EIDSP_USE_CMSIS_DSP
+
+    /**
+     * Power spectrum of a frame
+     * @param frame Row of a frame
+     * @param frame_size Size of the frame
+     * @param out_buffer Out buffer, size should be fft_points
+     * @param out_buffer_size Buffer size
+     * @param fft_points (int): The length of FFT. If fft_length is greater than frame_len, the frames will be zero-padded.
+     * @returns EIDSP_OK if OK
+     */
+    static int power_spectrum(
+        float *frame,
+        size_t frame_size,
+        float *out_buffer,
+        size_t out_buffer_size,
+        uint16_t fft_points)
+    {
+        if (out_buffer_size != static_cast<size_t>(fft_points / 2 + 1)) {
+            EIDSP_ERR(EIDSP_MATRIX_SIZE_MISMATCH);
+        }
+
+        int r = numpy::rfft(frame, frame_size, out_buffer, out_buffer_size, fft_points);
+        if (r != EIDSP_OK) {
+            return r;
+        }
+
+        for (size_t ix = 0; ix < out_buffer_size; ix++) {
+            out_buffer[ix] = (1.0 / static_cast<float>(fft_points)) *
+                (out_buffer[ix] * out_buffer[ix]);
+        }
+
+        return EIDSP_OK;
+    }
+
+    static int welch_max_hold(
+        float *input,
+        size_t input_size,
+        float *output,
+        size_t start_bin,
+        size_t stop_bin,
+        size_t fft_points,
+        bool do_overlap)
+    {
+        // save off one point to put back, b/c we're going to calculate in place
+        float saved_point = 0;
+        bool do_saved_point = false;
+        size_t fft_out_size = fft_points / 2 + 1;
+        float *fft_out;
+        ei_unique_ptr_t p_fft_out(nullptr, ei_free);
+        if (input_size < fft_points) {
+            fft_out = (float *)ei_calloc(fft_out_size, sizeof(float));
+            p_fft_out.reset(fft_out);
+        }
+        else {
+            // set input as output for in place operation
+            fft_out = input;
+            // save off one point to put back, b/c we're going to calculate in place
+            saved_point = input[fft_points / 2];
+            do_saved_point = true;
+        }
+
+        // init the output to zeros
+        memset(output, 0, sizeof(float) * (stop_bin - start_bin));
+        int input_ix = 0;
+        while (input_ix < (int)input_size) {
+            // Figure out if we need any zero padding
+            size_t n_input_points = input_ix + fft_points <= input_size ? fft_points
+                                                                        : input_size - input_ix;
+            EI_TRY(power_spectrum(
+                input + input_ix,
+                n_input_points,
+                fft_out,
+                fft_points / 2 + 1,
+                fft_points));
+            int j = 0;
+            // keep the max of the last frame and everything before
+            for (size_t i = start_bin; i < stop_bin; i++) {
+                output[j] = std::max(output[j], fft_out[i]);
+                j++;
+            }
+            if (do_overlap) {
+                if (do_saved_point) {
+                    // This step only matters first time through
+                    input[fft_points / 2] = saved_point;
+                    do_saved_point = false;
+                }
+                input_ix += fft_points / 2;
+            }
+            else {
+                input_ix += fft_points;
+            }
+        }
+
+        return EIDSP_OK;
+    }
+
+    static float variance(float *input, size_t size)
+    {
+        // Use CMSIS either way.  Will fall back to straight C when needed
+        float temp;
+#if EIDSP_USE_CMSIS_DSP
+        arm_var_f32(input, size, &temp);
+#else
+        float mean = 0.0f;
+        for (size_t i = 0; i < size; i++) {
+            mean += input[i];
+        }
+        mean /= size;
+
+        temp = 0.0f;
+        for (size_t i = 0; i < size; i++) {
+            temp += (input[i] - mean) * (input[i] - mean);
+        }
+        temp /= (size - 1);
+#endif
+        return temp;
+    }
+
+    /**
+     * This function handle the issue with zero values if the are exposed
+     * to become an argument for any log function.
+     * @param input Array
+     * @param input_size Size of array
+     * @returns void
+     */
+    static void zero_handling(float *input, size_t input_size)
+    {
+        for (size_t ix = 0; ix < input_size; ix++) {
+            if (input[ix] == 0) {
+                input[ix] = 1e-10;
+            }
+        }
+    }
+
+    /**
+     * This function handle the issue with zero values if the are exposed
+     * to become an argument for any log function.
+     * @param input Matrix
+     * @returns void
+     */
+    static void zero_handling(matrix_t *input)
+    {
+        zero_handling(input->buffer, input->rows * input->cols);
+    }
+
+    __attribute__((unused)) static void scale(fvec& v, float scale) {
+        for (auto& x : v) {
+            x *= scale;
+        }
+    }
+
+    __attribute__((unused)) static void sub(fvec& v, float b) {
+        for (auto& x : v) {
+            x -= b;
+        }
+    }
+
+    __attribute__((unused)) static void mul(float* y, const float* x, float* b, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            y[i] = x[i] * b[i];
+        }
+    }
+
+    __attribute__((unused)) static fvec diff(const float* v, size_t n) {
+        fvec d(n - 1);
+        for (size_t i = 0; i < d.size(); i++) {
+            d[i] = v[i + 1] - v[i];
+        }
+        return d;
+    }
+
+    __attribute__((unused)) static float sum(const float* v, size_t n) {
+        float sum = 0;
+        for (size_t i = 0; i < n; i++) {
+            sum += v[i];
+        }
+        return sum;
+    }
+
+    static float mean(const fvec& v) {
+        float mean = 0;
+        for (auto x : v) {
+            mean += x;
+        }
+        mean /= v.size();
+        return mean;
+    }
+
+    static float mean(const float* v, size_t n) {
+        float mean = 0;
+        for (size_t i = 0; i < n; i++) {
+            mean += v[i];
+        }
+        mean /= n;
+        return mean;
+    }
+
+    static float median(const float* v, size_t n) {
+        fvec vc(n);
+        std::copy(v, v + n, vc.begin());
+        std::sort(vc.begin(), vc.end());
+        if (vc.size() % 2 == 0) {
+            return (vc[vc.size() / 2 - 1] + vc[vc.size() / 2]) / 2;
+        }
+        return vc[vc.size() / 2];
+    }
+
+    __attribute__((unused)) static float median(const fvec& v) {
+        return median(v.data(), v.size());
+    }
+
+    static float stddev(const float* v, size_t n, float m /* mean */, int ddof = 0) {
+        float var = 0;
+        for (size_t i = 0; i < n; i++) {
+            var += (v[i] - m) * (v[i] - m);
+        }
+        var /= n - ddof;
+        return sqrt(var);
+    }
+
+    __attribute__((unused)) static float stddev(const float* v, size_t n) {
+        return stddev(v, n, mean(v, n), 0);
+    }
+
+    __attribute__((unused)) static float stddev(const float* v, size_t n, int ddof) {
+        return stddev(v, n, mean(v, n), ddof);
+    }
+
+    __attribute__((unused)) static float stddev(const fvec& v, int ddof = 0) {
+        return stddev(v.data(), v.size(), mean(v), ddof);
+    }
+
+    static float rms(const float* v, size_t n) {
+        float rms = 0;
+        for (size_t i = 0; i < n; i++) {
+            rms += v[i] * v[i];
+        }
+        rms /= n;
+        return sqrt(rms);
+    }
+
+    __attribute__((unused)) static float rms(const fvec& v) {
+        return rms(v.data(), v.size());
+    }
+
+    template <typename T>
+    static float max(const ei_vector<T>& v) {
+        return *std::max_element(v.begin(), v.end());
+    }
+
+    __attribute__((unused)) static float max(const float* v, size_t n) {
+        return *std::max_element(v, v + n);
+    }
+
+    template <typename T>
+    static float min(const ei_vector<T>& v) {
+        return *std::min_element(v.begin(), v.end());
+    }
+
+    __attribute__((unused)) static float min(const float* v, size_t n) {
+        return *std::min_element(v, v + n);
+    }
+
+    __attribute__((unused)) static int argmax(const fvec& v, int start, int end) {
+        return std::max_element(v.begin() + start, v.begin() + end) - v.begin();
+    }
+
+    __attribute__((unused)) static fvec divide(float num, const float* den, size_t n) {
+        fvec v(n);
+        for (size_t i = 0; i < n; i++) {
+            v[i] = num / den[i];
+        }
+        return v;
+    }
+
+    __attribute__((unused)) static ivec histogram(const float* x, size_t n, int a, int b, int inc) {
+        int num_bins = (b - a) / inc;
+        ivec bins(num_bins, 0);
+        for (size_t i = 0; i < n; i++) {
+            int bin = (int)((x[i] - a) / inc);
+            if (bin >= 0 && bin < num_bins) {
+                bins[bin]++;
+            }
+        }
+        return bins;
+    }
+
+    __attribute__((unused)) static fvec cumsum(const float* v, size_t n) {
+        fvec c(n);
+        c[0] = v[0];
+        for (size_t i = 1; i < n; i++) {
+            c[i] = c[i - 1] + v[i];
+        }
+        return c;
+    }
+
+    __attribute__((unused)) static fvec arrange(float start, float end, float step) {
+        assert(start < end);
+        assert(step > 0);
+        fvec v((size_t)((end - start) / step));
+        for (size_t i = 0; i < v.size(); i++) {
+            v[i] = start + i * step;
+        }
+        return v;
+    }
+
+    __attribute__((unused)) static void add(fvec& v, fvec& b) {
+        for (size_t i = 0; i < v.size(); i++) {
+            v[i] += b[i];
+        }
+    }
+
+    __attribute__((unused)) static float trapz(const fvec& x, const fvec& y, size_t lo, size_t hi) {
+        float area = 0;
+        for (size_t i = lo; i < hi; i++) {
+            area += (x[i + 1] - x[i]) * (y[i + 1] + y[i]) / 2;
+        }
+        return area;
+    }
+
+    __attribute__((unused)) static fvec quantile(const fvec& v, size_t start, size_t end, const fvec& q) {
+        end = std::min(end, v.size());
+        fvec vc(end - start);
+        std::copy(v.begin() + start, v.begin() + end, vc.begin());
+        std::sort(vc.begin(), vc.end());
+        fvec res(q.size());
+        for (size_t i = 0; i < q.size(); i++) {
+            res[i] = vc[q[i] * vc.size()];
+        }
+        return res;
+    }
+
+    __attribute__((unused)) static fvec quantile(const float* v, size_t n, const fvec& q) {
+        fvec vc(n);
+        std::copy(v, v + n, vc.begin());
+        std::sort(vc.begin(), vc.end());
+        fvec res(q.size());
+        for (size_t i = 0; i < q.size(); i++) {
+            res[i] = vc[q[i] * vc.size()];
+        }
+        return res;
+    }
+
+    static float dot(const float* x, const float* y, size_t n) {
+        float res = 0;
+        for (size_t i = 0; i < n; i++) {
+            res += x[i] * y[i];
+        }
+        return res;
+    }
+
+
+    __attribute__((unused)) static float cosine_similarity(const fvec& x, const fvec& y) {
+        float xy = dot(x.data(), y.data(), x.size());
+        float magx = dot(x.data(), x.data(), x.size());
+        float magy = dot(y.data(), y.data(), y.size());
+        xy /= sqrt(magx * magy);
+        return xy;
+    }
+
+    __attribute__((unused)) static void ln(fvec& v) {
+        for (auto& x : v) {
+            x = log(x);
+        }
+    }
+
+    static size_t next_power_of_2(size_t x) {
+        size_t res = 1;
+        while (res < x) {
+            res *= 2;
+        }
+        return res;
+    }
+
+    static void detrend(float* data, size_t n) {
+        // Calculate the mean of the data points
+        float mean = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            mean += data[i];
+        }
+        mean /= n;
+
+        // Calculate the slope of the best-fit line
+        float x_mean = (n + 1) / 2.0;
+        float y_mean = mean;
+        float numerator = 0.0;
+        float denominator = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            numerator += (i + 1 - x_mean) * (data[i] - y_mean);
+            denominator += (i + 1 - x_mean) * (i + 1 - x_mean);
+        }
+        float slope = numerator / denominator;
+
+        // Subtract the best-fit line from the data points to get the detrended data
+        for (size_t i = 0; i < n; i++) {
+            data[i] = data[i] - (slope * (i + 1));
+        }
+
+        // Calculate the mean of the detrended data
+        float detrended_mean = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            detrended_mean += data[i];
+        }
+        detrended_mean /= n;
+
+        // Subtract the mean of the detrended data from each element
+        for (size_t i = 0; i < n; i++) {
+            data[i] -= detrended_mean;
+        }
+    }
+
+    static fvec detrend(const fvec& data) {
+        auto ret = data;
+        detrend(ret.data(), ret.size());
+        return ret;
+    }
+
 };
 
+struct fmat {
+    ei_matrix* mat = nullptr;
+    fmat(size_t rows, size_t cols) {
+        mat = new ei_matrix(rows, cols);
+        assert(mat);
+    }
+
+    ~fmat() {
+        delete mat;
+    }
+
+    void resize(size_t rows, size_t cols) {
+        delete mat;
+        mat = new ei_matrix(rows, cols);
+    }
+
+    float* operator[](size_t i) {
+        if (mat == nullptr || i >= mat->rows) {
+            return nullptr;
+        }
+        return mat->get_row_ptr(i);
+    }
+
+    void fill(float x) {
+        if (mat == nullptr) {
+            return;
+        }
+        for (size_t i = 0; i < mat->rows; i++) {
+            for (size_t j = 0; j < mat->cols; j++) {
+                (*this)[i][j] = x;
+            }
+        }
+    }
+
+    void fill_col(size_t col, float x) {
+        if (mat == nullptr) {
+            return;
+        }
+        for (size_t i = 0; i < mat->rows; i++) {
+            (*this)[i][col] = x;
+        }
+    }
+
+    void fill_row(size_t row, float x) {
+        if (mat == nullptr) {
+            return;
+        }
+        for (size_t i = 0; i < mat->cols; i++) {
+            (*this)[row][i] = x;
+        }
+    }
+};
 } // namespace ei
 
 #endif // _EIDSP_NUMPY_H_

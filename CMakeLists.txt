@@ -231,6 +231,7 @@ if("${device.libraries}" STRGREATER "")
 endif()
 
 add_definitions(-DEIDSP_USE_CMSIS_DSP=1 -DEIDSP_QUANTIZE_FILTERBANK=0 -DARM_MATH_LOOPUNROLL)
+add_definitions(-DEIDSP_LOAD_CMSIS_DSP_SOURCES=1 -DEI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN=1)
 
 #Edge impulse SDK include directories
 include_directories(${PROJECT_SOURCE_DIR}/source/edge-impulse-sdk)
